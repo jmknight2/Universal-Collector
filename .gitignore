@@ -1,3 +1,6 @@
+# Project Specific
+certs/*
+
 # Logs
 logs
 *.log

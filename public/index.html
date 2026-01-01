@@ -1,0 +1,1033 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Universal Collector</title>
+    <meta name="theme-color" content="#0f172a">
+    
+    <!-- 1. Import Map -->
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.294.0"
+        }
+    }
+    </script>
+
+    <!-- 2. Styles and Global Scripts -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    <!-- Google Identity Services -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; }
+        .card-gradient { background: linear-gradient(to bottom, transparent 0%, #1e293b 100%); }
+        #reader video { object-fit: cover; border-radius: 0.5rem; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+        
+        /* Disabled input styles for View Mode */
+        input:disabled { opacity: 0.7; border-color: transparent; background: #0f172a; color: #fff; }
+        
+        /* Hide scrollbar for filter row */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef, useMemo } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { Search, Plus, Scan, Check, X, Box, Trash2, Database, Calendar, Tag, DollarSign, Upload, Image as ImageIcon, Edit2, Save, ChevronLeft, ChevronRight, CheckSquare, Filter, Globe, Hash, Layers, LogOut, Gamepad2, Disc, Book, Monitor } from 'lucide-react';
+
+        // --- CONFIGURATION ---
+        // TODO: Replace this with your actual Google Client ID from https://console.cloud.google.com/
+        const GOOGLE_CLIENT_ID = "1036407000501-7e2vae5lnfvl6grfclmsfkjit106obgs.apps.googleusercontent.com";
+
+        // --- CATEGORY DEFINITIONS ---
+        // This abstracts the field logic out of the database and into the app structure
+        const CATEGORY_SCHEMAS = {
+            'Toy': {
+                icon: Box,
+                fields: [
+                    { name: 'theme', label: 'Theme / Universe', icon: Globe, placeholder: 'e.g. Star Wars', type: 'text' },
+                    { name: 'collection', label: 'Line / Series', icon: Layers, placeholder: 'e.g. Black Series', type: 'text', required: true },
+                    { name: 'brand', label: 'Manufacturer', icon: Tag, placeholder: 'e.g. Hasbro', type: 'text' },
+                ]
+            },
+            'Video Games': {
+                icon: Gamepad2,
+                fields: [
+                    { name: 'collection', label: 'Console / Platform', icon: Monitor, placeholder: 'e.g. SNES', type: 'text', required: true },
+                    { name: 'developer', label: 'Developer', icon: Box, placeholder: 'e.g. Nintendo', type: 'text' },
+                    { name: 'publisher', label: 'Publisher', icon: Disc, placeholder: 'e.g. Nintendo', type: 'text' },
+                    { name: 'condition', label: 'Condition', icon: CheckSquare, placeholder: 'e.g. CIB', type: 'text' },
+                ]
+            },
+            'Books': {
+                icon: Book,
+                fields: [
+                    { name: 'collection', label: 'Author', icon: Box, placeholder: 'e.g. Timothy Zahn', type: 'text' },
+                    { name: 'publisher', label: 'Publisher', icon: Tag, placeholder: 'e.g. Del Rey', type: 'text' },
+                    { name: 'isbn', label: 'ISBN', icon: Hash, placeholder: '978-3-16-148410-0', type: 'text' },
+                ]
+            },
+            'General': {
+                icon: Database,
+                fields: [
+                    { name: 'collection', label: 'Group / Collection', icon: Layers, placeholder: 'Collection Name', type: 'text' },
+                    { name: 'brand', label: 'Brand', icon: Tag, placeholder: 'Brand Name', type: 'text' },
+                ]
+            }
+        };
+
+        // API Client
+        const api = {
+            get: () => fetch('/api/items').then(r => r.json()),
+            save: (item, id = null) => {
+                const isFormData = item instanceof FormData;
+                const method = id ? 'PUT' : 'POST';
+                const url = id ? `/api/items/${id}` : '/api/items';
+                
+                return fetch(url, {
+                    method: method,
+                    headers: isFormData ? {} : { 'Content-Type': 'application/json' },
+                    body: isFormData ? item : JSON.stringify(item)
+                }).then(r => r.json());
+            },
+            toggle: (id, owned) => fetch(`/api/items/${id}/toggle`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ owned })
+            }).then(r => r.json()),
+            delete: (id) => fetch(`/api/items/${id}`, { method: 'DELETE' })
+        };
+
+        // --- UI Components ---
+
+        const Modal = ({ isOpen, title, onClose, children }) => {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+                     <div className="bg-slate-900 rounded-xl w-full max-w-md border border-slate-800 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+                        <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
+                            <h2 className="text-lg font-bold text-white flex items-center gap-2">{title}</h2>
+                            <button onClick={onClose} className="p-1 hover:bg-slate-800 rounded text-slate-400 transition-colors"><X size={20} /></button>
+                        </div>
+                        <div className="p-4 overflow-y-auto custom-scrollbar">
+                            {children}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // Updated FormInput with Datalist support for Autocomplete
+        const FormInput = ({ label, icon: Icon, disabled, suggestions = [], ...props }) => {
+            const listId = useMemo(() => `list-${Math.random().toString(36).substr(2, 9)}`, []);
+            
+            return (
+                <div className="mb-3">
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">{label}</label>
+                    <div className="relative">
+                        {Icon && <Icon size={16} className={`absolute left-3 top-3 ${disabled ? 'text-slate-600' : 'text-slate-500'}`} />}
+                        <input 
+                            {...props}
+                            disabled={disabled}
+                            list={suggestions.length > 0 ? listId : undefined}
+                            className={`w-full rounded-lg py-2.5 text-sm text-slate-200 focus:ring-2 focus:ring-blue-600 focus:border-transparent outline-none transition-all 
+                            ${disabled ? 'bg-slate-950/50 border-transparent cursor-default' : 'bg-slate-950 border border-slate-800'} 
+                            ${Icon ? 'pl-10 pr-3' : 'px-3'}`}
+                        />
+                        {suggestions.length > 0 && (
+                            <datalist id={listId}>
+                                {suggestions.map((val, i) => <option key={i} value={val} />)}
+                            </datalist>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // Custom Multi-Select Component
+        const MultiSelect = ({ label, options, selected, onChange, icon: Icon }) => {
+            const [isOpen, setIsOpen] = useState(false);
+            const containerRef = useRef(null);
+            const [position, setPosition] = useState({ top: 0, left: 0 });
+
+            useEffect(() => {
+                const handleClickOutside = (event) => {
+                    if (containerRef.current && !containerRef.current.contains(event.target)) {
+                        setIsOpen(false);
+                    }
+                };
+                document.addEventListener('mousedown', handleClickOutside);
+                return () => document.removeEventListener('mousedown', handleClickOutside);
+            }, []);
+
+            // Calculate position immediately on toggle to prevent visual jumping
+            const handleToggle = () => {
+                if (!isOpen && containerRef.current) {
+                    const rect = containerRef.current.getBoundingClientRect();
+                    let left = rect.left;
+                    if (left + 224 > window.innerWidth) { 
+                        left = window.innerWidth - 230; 
+                    }
+                    setPosition({
+                        top: rect.bottom + 8,
+                        left: left
+                    });
+                }
+                setIsOpen(!isOpen);
+            };
+
+            const toggleOption = (option) => {
+                const newSelected = selected.includes(option)
+                    ? selected.filter(item => item !== option)
+                    : [...selected, option];
+                onChange(newSelected);
+            };
+
+            return (
+                <div ref={containerRef}>
+                    <button
+                        onClick={handleToggle}
+                        className={`flex items-center gap-2 text-xs font-medium py-1.5 px-3 rounded-full border transition-colors whitespace-nowrap 
+                        ${selected.length > 0 ? 'bg-blue-600/20 border-blue-600 text-blue-400' : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'}`}
+                    >
+                        {Icon && <Icon size={14} />}
+                        {label}
+                        {selected.length > 0 && <span className="bg-blue-600 text-white text-[10px] px-1.5 rounded-full ml-1">{selected.length}</span>}
+                    </button>
+
+                    {isOpen && (
+                        <div 
+                            className="fixed w-56 bg-slate-900 border border-slate-800 rounded-xl shadow-xl z-[60] overflow-hidden max-h-64 overflow-y-auto custom-scrollbar animate-in fade-in zoom-in-95 duration-100"
+                            style={{ top: position.top, left: position.left }}
+                        >
+                            {options.length === 0 ? (
+                                <div className="p-3 text-xs text-slate-500 text-center">No options available</div>
+                            ) : (
+                                <div className="p-1">
+                                    {options.map(option => (
+                                        <button
+                                            key={option}
+                                            onClick={() => toggleOption(option)}
+                                            className="w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 rounded-lg flex items-center gap-2 transition-colors"
+                                        >
+                                            <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors flex-shrink-0 ${selected.includes(option) ? 'bg-blue-600 border-blue-600' : 'border-slate-600'}`}>
+                                                {selected.includes(option) && <Check size={10} className="text-white" />}
+                                            </div>
+                                            <span className="truncate">{option}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const ImageManager = ({ images, onChange, readOnly }) => {
+            const [currentIndex, setCurrentIndex] = useState(0);
+            const fileInputRef = useRef(null);
+
+            const handleFileSelect = (e) => {
+                const files = Array.from(e.target.files);
+                const newImages = files.map(file => ({
+                    id: Math.random().toString(36).substr(2, 9),
+                    url: URL.createObjectURL(file),
+                    file: file
+                }));
+                onChange([...images, ...newImages]);
+            };
+
+            const removeImage = (indexToRemove) => {
+                onChange(images.filter((_, index) => index !== indexToRemove));
+                if (currentIndex >= images.length - 1) setCurrentIndex(Math.max(0, images.length - 2));
+            };
+
+            const nextImage = (e) => { e.preventDefault(); setCurrentIndex((prev) => (prev + 1) % images.length); };
+            const prevImage = (e) => { e.preventDefault(); setCurrentIndex((prev) => (prev - 1 + images.length) % images.length); };
+
+            // Render: Read Only Carousel
+            if (readOnly) {
+                if (images.length === 0) return (
+                    <div className="w-full h-48 bg-slate-950 border border-slate-800 rounded-xl flex flex-col items-center justify-center text-slate-600">
+                        <ImageIcon size={32} className="mb-2 opacity-50"/>
+                        <span className="text-xs uppercase font-bold tracking-wider">No Images</span>
+                    </div>
+                );
+
+                return (
+                    <div className="relative w-full h-64 bg-slate-950 rounded-xl overflow-hidden border border-slate-800 group">
+                        <img src={images[currentIndex].url} className="w-full h-full object-contain" />
+                        
+                        {images.length > 1 && (
+                            <>
+                                <button onClick={prevImage} className="absolute left-2 top-1/2 -translate-y-1/2 bg-black/50 p-1 rounded-full text-white hover:bg-black/70 backdrop-blur-sm"><ChevronLeft size={20}/></button>
+                                <button onClick={nextImage} className="absolute right-2 top-1/2 -translate-y-1/2 bg-black/50 p-1 rounded-full text-white hover:bg-black/70 backdrop-blur-sm"><ChevronRight size={20}/></button>
+                                <div className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-black/50 px-2 py-0.5 rounded-full text-[10px] text-white backdrop-blur-sm">
+                                    {currentIndex + 1} / {images.length}
+                                </div>
+                            </>
+                        )}
+                    </div>
+                );
+            }
+
+            // Render: Edit Mode Grid
+            return (
+                <div className="mb-6">
+                    <div className="grid grid-cols-3 gap-2 mb-2">
+                        {images.map((img, idx) => (
+                            <div key={img.id || idx} className="relative aspect-square bg-slate-950 rounded-lg overflow-hidden border border-slate-800 group">
+                                <img src={img.url} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
+                                <button 
+                                    type="button"
+                                    onClick={() => removeImage(idx)}
+                                    className="absolute top-1 right-1 bg-red-600 text-white p-1 rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity"
+                                >
+                                    <X size={12} />
+                                </button>
+                            </div>
+                        ))}
+                        <button 
+                            type="button"
+                            onClick={() => fileInputRef.current?.click()}
+                            className="aspect-square bg-slate-950 border-2 border-dashed border-slate-800 rounded-lg flex flex-col items-center justify-center text-slate-500 hover:border-blue-500 hover:text-blue-500 hover:bg-slate-900 transition-all"
+                        >
+                            <Plus size={24} />
+                            <span className="text-[10px] mt-1 font-bold">ADD</span>
+                        </button>
+                    </div>
+                    <input 
+                        type="file" 
+                        ref={fileInputRef} 
+                        className="hidden" 
+                        accept="image/*" 
+                        multiple 
+                        onChange={handleFileSelect} 
+                    />
+                </div>
+            );
+        };
+
+        const ItemForm = ({ initialData, onSave, onCancel, readOnly = false, userEmail, existingItems = [] }) => {
+            const [formData, setFormData] = useState({
+                id: null,
+                name: '',
+                theme: '',
+                collection: 'General',
+                brand: '',
+                releaseDate: '',
+                price: '',
+                barcode: '',
+                quantity: 1, 
+                category: 'Toy', // Changed default to Toy
+                owned: true,
+                ...initialData,
+                ...(initialData?.data || {})
+            });
+            
+            const [images, setImages] = useState(() => {
+                const urls = initialData?.data?.imageUrls || (initialData?.data?.imageUrl ? [initialData.data.imageUrl] : []);
+                return urls.map(u => ({ url: u }));
+            });
+
+            // Helper to get unique autocomplete values from existing items
+            const getSuggestions = (field) => {
+                if (!existingItems) return [];
+                const values = existingItems.map(i => {
+                    if (field === 'collection' && i.collection) return i.collection;
+                    if (i.data && i.data[field]) return i.data[field];
+                    return null;
+                }).filter(Boolean);
+                return [...new Set(values)].sort();
+            };
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                
+                const payload = new FormData();
+                payload.append('name', formData.name);
+                payload.append('category', formData.category);
+                payload.append('collection', formData.collection);
+                if (formData.barcode) payload.append('barcode', formData.barcode);
+                payload.append('owned', formData.owned);
+
+                const existingUrls = images.filter(i => !i.file).map(i => i.url);
+                const newFiles = images.filter(i => i.file).map(i => i.file);
+
+                const genericData = { 
+                    ...formData, 
+                    owner: formData.owner || userEmail,
+                    imageUrls: existingUrls 
+                };
+                delete genericData.id;
+                delete genericData.name;
+                delete genericData.category;
+                delete genericData.barcode;
+                delete genericData.owned;
+
+                payload.append('data', JSON.stringify(genericData));
+
+                newFiles.forEach(file => {
+                    payload.append('images', file);
+                });
+
+                onSave(payload, formData.id);
+            };
+
+            const currentSchema = CATEGORY_SCHEMAS[formData.category] || CATEGORY_SCHEMAS['General'];
+
+            return (
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    
+                    <ImageManager 
+                        images={images} 
+                        onChange={setImages} 
+                        readOnly={readOnly} 
+                    />
+
+                    {/* Ownership & Category */}
+                    <div className="flex gap-2">
+                        <div className={`flex-1 flex items-center gap-3 p-3 rounded-lg border ${readOnly ? 'bg-slate-900 border-slate-800' : 'bg-slate-900/50 border-slate-700'}`}>
+                            <button
+                                type="button"
+                                disabled={readOnly}
+                                onClick={() => setFormData(prev => ({ ...prev, owned: !prev.owned }))}
+                                className={`relative w-10 h-5 rounded-full transition-colors flex-shrink-0 ${formData.owned ? 'bg-green-600' : 'bg-slate-700'}`}
+                            >
+                                <div className={`absolute top-1 left-1 bg-white w-3 h-3 rounded-full transition-transform ${formData.owned ? 'translate-x-5' : 'translate-x-0'}`} />
+                            </button>
+                            <span className={`text-xs font-medium ${formData.owned ? 'text-green-400' : 'text-slate-400'}`}>
+                                {formData.owned ? 'Owned' : 'Wanted'}
+                            </span>
+                        </div>
+                        
+                        <div className="flex-1 relative">
+                            <select
+                                value={formData.category}
+                                onChange={e => setFormData({...formData, category: e.target.value})}
+                                disabled={readOnly}
+                                className="w-full h-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 text-sm text-slate-200 focus:border-blue-500 outline-none appearance-none disabled:bg-slate-900 disabled:border-slate-800"
+                            >
+                                {Object.keys(CATEGORY_SCHEMAS).map(cat => (
+                                    <option key={cat} value={cat}>{cat}</option>
+                                ))}
+                            </select>
+                            <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500">
+                                <ChevronRight size={14} className="rotate-90" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <FormInput 
+                        label="Item Name" 
+                        placeholder="Item Name" 
+                        value={formData.name}
+                        onChange={e => setFormData({...formData, name: e.target.value})}
+                        required
+                        disabled={readOnly}
+                    />
+
+                    {/* Dynamic Fields Grid */}
+                    <div className="grid grid-cols-2 gap-3">
+                        {currentSchema.fields.map(field => (
+                            <FormInput 
+                                key={field.name}
+                                label={field.label}
+                                placeholder={field.placeholder}
+                                icon={field.icon}
+                                type={field.type}
+                                value={formData[field.name] || ''}
+                                onChange={e => setFormData({...formData, [field.name]: e.target.value})}
+                                disabled={readOnly}
+                                required={field.required}
+                                suggestions={!readOnly ? getSuggestions(field.name) : []}
+                            />
+                        ))}
+                    </div>
+                    
+                    {/* Common Fields */}
+                    <div className="grid grid-cols-2 gap-3">
+                         <FormInput 
+                            label="Quantity" 
+                            type="number"
+                            min="1"
+                            icon={Hash}
+                            value={formData.quantity}
+                            onChange={e => setFormData({...formData, quantity: parseInt(e.target.value) || 1})}
+                            disabled={readOnly}
+                        />
+                         <FormInput 
+                            label="Price" 
+                            type="number"
+                            step="0.01"
+                            icon={DollarSign}
+                            value={formData.price}
+                            onChange={e => setFormData({...formData, price: e.target.value})}
+                            disabled={readOnly}
+                        />
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3">
+                         <FormInput 
+                            label="Release Date" 
+                            type="date"
+                            icon={Calendar}
+                            value={formData.releaseDate}
+                            onChange={e => setFormData({...formData, releaseDate: e.target.value})}
+                            disabled={readOnly}
+                        />
+                    </div>
+                    
+                    {formData.barcode && (
+                        <div className="bg-slate-950/50 p-2 rounded border border-dashed border-slate-800 text-xs font-mono text-slate-500 text-center mb-4">
+                            Barcode: {formData.barcode}
+                        </div>
+                    )}
+
+                    {!readOnly && (
+                        <div className="pt-2 flex gap-3">
+                            <button type="button" onClick={onCancel} className="flex-1 px-4 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors">Cancel</button>
+                            <button type="submit" className="flex-1 px-4 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-500 transition-colors shadow-lg shadow-blue-900/20">Save Item</button>
+                        </div>
+                    )}
+                </form>
+            );
+        };
+
+        const ItemDetailsModal = ({ isOpen, item, onClose, onSave, onDelete, userEmail, existingItems }) => {
+            const [isEditing, setIsEditing] = useState(false);
+            
+            useEffect(() => { setIsEditing(false); }, [item]);
+
+            if (!isOpen || !item) return null;
+
+            return (
+                <Modal isOpen={isOpen} title={isEditing ? "Edit Item" : "Item Details"} onClose={onClose}>
+                    <div className="mb-4 flex justify-between items-center">
+                        <button 
+                            onClick={() => onDelete(item)}
+                            className="text-red-500 hover:text-red-400 text-sm flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-red-500/10 transition-colors"
+                        >
+                            <Trash2 size={16}/> Delete
+                        </button>
+
+                        {!isEditing && (
+                            <button 
+                                onClick={() => setIsEditing(true)} 
+                                className="text-blue-400 hover:text-white text-sm flex items-center gap-2 px-2 py-1.5 rounded hover:bg-slate-800 transition-colors"
+                            >
+                                <Edit2 size={16}/> Edit Details
+                            </button>
+                        )}
+                    </div>
+                    <ItemForm 
+                        initialData={item} 
+                        readOnly={!isEditing} 
+                        onCancel={() => isEditing ? setIsEditing(false) : onClose()}
+                        userEmail={userEmail}
+                        existingItems={existingItems}
+                        onSave={(data, id) => {
+                            onSave(data, id);
+                            setIsEditing(false);
+                        }}
+                    />
+                </Modal>
+            );
+        };
+
+        const ItemCard = ({ item, onToggle, onClick, onDelete, isSelectionMode, isSelected }) => {
+            const thumbnail = item.data.imageUrls?.[0] || item.data.imageUrl;
+            const quantity = item.data.quantity || 1;
+            
+            // Format price
+            const formattedPrice = new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+            }).format(item.data?.price || 0);
+
+            // Determine subtitle based on category
+            let subtitle = item.collection;
+            if (item.category === 'Video Games' && item.data.collection) subtitle = item.data.collection;
+            if (item.category === 'Books' && item.data.collection) subtitle = item.data.collection;
+
+            return (
+                <div 
+                    onClick={() => onClick(item)}
+                    className={`relative rounded-xl overflow-hidden transition-all duration-300 cursor-pointer 
+                        ${isSelected ? 'ring-2 ring-blue-600 bg-slate-800' : 
+                         item.owned ? 'bg-slate-800 ring-1 ring-slate-600 shadow-lg' : 'bg-slate-900/40 border border-dashed border-slate-800 opacity-70 hover:opacity-100'}`}
+                >
+                    <div className="h-48 bg-slate-950 relative flex items-center justify-center overflow-hidden group">
+                        {thumbnail ? (
+                            <img src={thumbnail} className="w-full h-full object-contain p-2 transition-all duration-500" onError={(e) => e.target.style.display='none'} />
+                        ) : (
+                            <Box size={40} className="text-slate-700" />
+                        )}
+                        <div className="absolute inset-0 card-gradient pointer-events-none"></div>
+                        
+                        {/* Category Badge */}
+                        <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-sm text-slate-300 text-[9px] px-2 py-0.5 rounded border border-slate-700">
+                            {item.category}
+                        </div>
+
+                        {/* Quantity Badge */}
+                        {quantity > 1 && (
+                            <div className="absolute top-2 right-2 bg-blue-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-lg z-10 border border-blue-500">
+                                x{quantity}
+                            </div>
+                        )}
+
+                        {/* Selection Overlay */}
+                        {isSelectionMode && (
+                            <div className={`absolute top-2 left-2 z-20 p-1.5 rounded-full ${isSelected ? 'bg-blue-600 text-white' : 'bg-black/50 text-slate-400 border border-slate-500'}`}>
+                                {isSelected ? <Check size={14} /> : <div className="w-3.5 h-3.5" />}
+                            </div>
+                        )}
+                    </div>
+                    
+                    <div className="p-3 relative bg-slate-900/50">
+                        {/* Optional Top Label (Theme/Platform) */}
+                        {item.data?.theme && item.category === 'Toy' && (
+                            <div className="text-[10px] uppercase font-bold tracking-wider text-blue-500 mb-0.5">{item.data.theme}</div>
+                        )}
+                        
+                        <div className="text-[10px] font-semibold text-slate-500 mb-1 truncate">{subtitle}</div>
+                        <h3 className="font-bold text-slate-100 text-sm leading-tight mb-2 line-clamp-2 h-10 pr-6">{item.name}</h3>
+                        
+                        {item.data?.price && (
+                            <div className="text-xs text-slate-300 font-mono mt-1">{formattedPrice}</div>
+                        )}
+
+                        {item.owned && !isSelectionMode && (
+                            <div className="absolute bottom-3 right-3 text-green-500">
+                                <Check size={16} />
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const ConfirmModal = ({ isOpen, title, message, onConfirm, onCancel }) => (
+            <Modal isOpen={isOpen} title={title} onClose={onCancel}>
+                <p className="text-slate-300 mb-6">{message}</p>
+                <div className="flex gap-3">
+                    <button onClick={onCancel} className="flex-1 px-4 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800">Cancel</button>
+                    <button onClick={onConfirm} className="flex-1 px-4 py-2 rounded-lg text-white font-medium hover:opacity-90 bg-red-600">Delete</button>
+                </div>
+            </Modal>
+        );
+
+        const LoginPage = ({ onLogin }) => {
+            const buttonRef = useRef(null);
+
+            useEffect(() => {
+                const initGoogle = () => {
+                    if (window.google && buttonRef.current) {
+                        google.accounts.id.initialize({
+                            client_id: GOOGLE_CLIENT_ID,
+                            callback: (response) => {
+                                try {
+                                    const payload = JSON.parse(atob(response.credential.split('.')[1]));
+                                    onLogin(payload);
+                                } catch (e) {
+                                    console.error("Login Error", e);
+                                }
+                            }
+                        });
+                        google.accounts.id.renderButton(
+                            buttonRef.current,
+                            { theme: "outline", size: "large" }
+                        );
+                    }
+                };
+
+                if (window.google) {
+                    initGoogle();
+                } else {
+                    const interval = setInterval(() => {
+                        if (window.google) {
+                            clearInterval(interval);
+                            initGoogle();
+                        }
+                    }, 100);
+                    return () => clearInterval(interval);
+                }
+            }, [onLogin]);
+
+            return (
+                <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4">
+                    <div className="bg-slate-900 p-8 rounded-xl border border-slate-800 shadow-2xl flex flex-col items-center text-center max-w-sm w-full">
+                        <div className="w-16 h-16 bg-blue-600/20 text-blue-500 rounded-full flex items-center justify-center mb-6">
+                            <Box size={32} />
+                        </div>
+                        <h1 className="text-2xl font-bold text-white mb-2">Universal Collector</h1>
+                        <p className="text-slate-400 mb-8">Sign in to access your collection</p>
+                        
+                        <div ref={buttonRef} className="w-full flex justify-center h-[40px]"></div>
+                        
+                        {GOOGLE_CLIENT_ID.includes("YOUR_GOOGLE") && (
+                            <div className="mt-6 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded text-yellow-200 text-xs text-left">
+                                <strong>Setup Required:</strong><br/>
+                                Edit <code>index.html</code> and replace <code>GOOGLE_CLIENT_ID</code>.
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [items, setItems] = useState([]);
+            const [search, setSearch] = useState("");
+            const [loading, setLoading] = useState(true);
+            const [viewMode, setViewMode] = useState('list');
+            
+            // Filter state (Multi-Select Arrays)
+            const [filterCategory, setFilterCategory] = useState([]);
+            const [filterCollections, setFilterCollections] = useState([]);
+            const [filterBrands, setFilterBrands] = useState([]);
+            
+            // Selection Mode State
+            const [isSelectionMode, setIsSelectionMode] = useState(false);
+            const [selectedIds, setSelectedIds] = useState(new Set());
+            
+            const [activeItem, setActiveItem] = useState(null);
+            const [modal, setModal] = useState({ type: null, data: null });
+
+            // Auth Check
+            useEffect(() => {
+                const savedUser = localStorage.getItem('uc_user');
+                if (savedUser) {
+                    setUser(JSON.parse(savedUser));
+                }
+            }, []);
+
+            // Data Load
+            useEffect(() => { 
+                if (user) loadData(); 
+            }, [user]);
+
+            const loadData = () => {
+                setLoading(true);
+                api.get()
+                    .then(data => setItems(data))
+                    .catch(err => console.error(err))
+                    .finally(() => setLoading(false));
+            };
+
+            const handleLogin = (userData) => {
+                setUser(userData);
+                localStorage.setItem('uc_user', JSON.stringify(userData));
+            };
+
+            const handleLogout = () => {
+                if (window.google) {
+                    google.accounts.id.disableAutoSelect();
+                }
+                setUser(null);
+                setItems([]); // Clear items to ensure clean state
+                localStorage.removeItem('uc_user');
+            };
+
+            const closeModal = () => setModal({ type: null, data: null });
+
+            const handleSaveItem = (itemData, id) => {
+                api.save(itemData, id).then(() => {
+                    loadData();
+                    closeModal();
+                    setActiveItem(null);
+                });
+            };
+
+            const handleDeleteRequest = (item) => {
+                 setModal({ type: 'confirm_delete', data: item });
+            };
+
+            // Selection Handlers
+            const toggleSelection = (id) => {
+                const newSet = new Set(selectedIds);
+                if (newSet.has(id)) newSet.delete(id);
+                else newSet.add(id);
+                setSelectedIds(newSet);
+            };
+
+            const handleCardClick = (item) => {
+                if (isSelectionMode) {
+                    toggleSelection(item.id);
+                } else {
+                    setActiveItem(item);
+                }
+            };
+
+            const handleSelectAllToggle = () => {
+                if (selectedIds.size > 0) {
+                    setSelectedIds(new Set());
+                } else {
+                    setSelectedIds(new Set(filtered.map(i => i.id)));
+                }
+            };
+            
+            const confirmBulkDelete = async () => {
+                const ids = Array.from(selectedIds);
+                await Promise.all(ids.map(id => api.delete(id)));
+                loadData();
+                setSelectedIds(new Set());
+                setIsSelectionMode(false);
+                closeModal();
+            };
+
+            const clearFilters = () => {
+                setFilterCategory([]);
+                setFilterCollections([]);
+                setFilterBrands([]);
+            };
+
+            // Extract unique values for filters
+            const categories = useMemo(() => 
+                [...new Set(items.map(i => i.category).filter(Boolean))].sort(), 
+            [items]);
+
+            const collections = useMemo(() => 
+                [...new Set(items.map(i => i.collection).filter(Boolean))].sort(), 
+            [items]);
+
+            const brands = useMemo(() => 
+                [...new Set(items.map(i => i.data?.brand).filter(Boolean))].sort(), 
+            [items]);
+
+            const filtered = items.filter(i => {
+                // IMPORTANT: Check user exists to prevent crashes during logout transition
+                if (!user) return false;
+
+                // Must own the item (strictly filtered by email)
+                const isOwner = i.data?.owner === user.email;
+
+                const matchesSearch = i.name.toLowerCase().includes(search.toLowerCase()) || 
+                    i.collection.toLowerCase().includes(search.toLowerCase()) ||
+                    (i.barcode && i.barcode.includes(search));
+                
+                const matchesCategory = filterCategory.length === 0 || filterCategory.includes(i.category);
+                const matchesCollection = filterCollections.length === 0 || filterCollections.includes(i.collection);
+                const matchesBrand = filterBrands.length === 0 || filterBrands.includes(i.data?.brand);
+
+                return isOwner && matchesSearch && matchesCategory && matchesCollection && matchesBrand;
+            });
+
+            // If not logged in, show login page
+            if (!user) {
+                return <LoginPage onLogin={handleLogin} />;
+            }
+
+            return (
+                <div className="min-h-screen pb-20 bg-slate-950">
+                    {/* View/Edit Details Modal */}
+                    <ItemDetailsModal 
+                        isOpen={!!activeItem} 
+                        item={activeItem} 
+                        onClose={() => setActiveItem(null)} 
+                        onSave={handleSaveItem}
+                        onDelete={handleDeleteRequest}
+                        userEmail={user.email}
+                        existingItems={items}
+                    />
+
+                    {/* New Item Modal */}
+                    <Modal isOpen={modal.type === 'form'} title="Add Manual Item" onClose={closeModal}>
+                         <ItemForm 
+                             initialData={{}} 
+                             onSave={(data) => handleSaveItem(data, null)} 
+                             onCancel={closeModal} 
+                             userEmail={user.email}
+                             existingItems={items}
+                         />
+                    </Modal>
+
+                    {/* Delete Confirmation (Single) */}
+                    <ConfirmModal 
+                        isOpen={modal.type === 'confirm_delete'}
+                        title="Delete Item"
+                        message={`Are you sure you want to permanently delete "${modal.data?.name}"?`}
+                        onConfirm={() => {
+                            api.delete(modal.data.id).then(() => {
+                                loadData();
+                                closeModal();
+                                setActiveItem(null);
+                            });
+                        }}
+                        onCancel={closeModal}
+                    />
+
+                    {/* Delete Confirmation (Bulk) */}
+                    <ConfirmModal 
+                        isOpen={modal.type === 'confirm_bulk_delete'}
+                        title="Delete Selected Items"
+                        message={`Are you sure you want to delete ${selectedIds.size} selected items? This cannot be undone.`}
+                        onConfirm={confirmBulkDelete}
+                        onCancel={closeModal}
+                    />
+
+                    {/* Scanner */}
+                    {viewMode === 'scanning' && (
+                        <div className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center p-4">
+                             <button onClick={() => setViewMode('list')} className="absolute top-4 right-4 text-white"><X size={32}/></button>
+                             <div id="reader" className="w-full max-w-sm h-64 bg-slate-800 rounded"></div>
+                        </div>
+                    )}
+
+                    {/* Header */}
+                    <header className="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-md border-b border-slate-800 px-4 py-3">
+                        <div className="max-w-5xl mx-auto space-y-3">
+                            <div className="flex gap-3 items-center">
+                                {/* Only show Hamburger / Logout on mobile or small screens, or always if you prefer */}
+                                <button 
+                                    onClick={handleLogout}
+                                    className="md:hidden p-2 text-slate-400 hover:text-white"
+                                >
+                                    <LogOut size={20} />
+                                </button>
+
+                                {isSelectionMode ? (
+                                    <>
+                                        <button 
+                                            onClick={() => { setIsSelectionMode(false); setSelectedIds(new Set()); }} 
+                                            className="h-10 px-3 text-slate-400 hover:bg-slate-800 rounded-lg flex items-center justify-center border border-transparent hover:border-slate-700 transition-colors"
+                                        >
+                                            <X size={20} />
+                                        </button>
+                                        <span className="flex-1 font-bold text-white text-sm">{selectedIds.size} Selected</span>
+                                        
+                                        <button 
+                                            onClick={handleSelectAllToggle} 
+                                            className="h-10 text-xs font-medium bg-slate-800 text-slate-300 px-3 rounded-lg hover:bg-slate-700 transition-colors border border-slate-700"
+                                        >
+                                            {selectedIds.size > 0 ? "Deselect All" : "Select All"}
+                                        </button>
+                                        
+                                        {selectedIds.size > 0 && (
+                                            <button 
+                                                onClick={() => setModal({ type: 'confirm_bulk_delete' })} 
+                                                className="h-10 w-10 bg-red-600 text-white rounded-lg hover:bg-red-500 transition-colors shadow-lg flex items-center justify-center"
+                                            >
+                                                <Trash2 size={20} />
+                                            </button>
+                                        )}
+                                    </>
+                                ) : (
+                                    <>
+                                        <div className="relative flex-1">
+                                            <Search className="absolute left-3 top-2.5 text-slate-500" size={18} />
+                                            <input 
+                                                value={search} 
+                                                onChange={e => setSearch(e.target.value)} 
+                                                className="w-full h-10 bg-slate-900 border border-slate-800 rounded-lg pl-10 pr-4 text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-600 transition-all placeholder:text-slate-500" 
+                                                placeholder="Search items..." 
+                                            />
+                                        </div>
+                                        <button 
+                                            onClick={() => setIsSelectionMode(true)} 
+                                            className="h-10 w-10 bg-slate-800 text-slate-200 rounded-lg border border-slate-700 hover:bg-slate-700 transition-colors flex items-center justify-center"
+                                            title="Select Items"
+                                        >
+                                            <CheckSquare size={20} />
+                                        </button>
+                                        <button 
+                                            onClick={() => setModal({ type: 'form' })} 
+                                            className="h-10 w-10 bg-slate-800 text-slate-200 rounded-lg border border-slate-700 hover:bg-slate-700 transition-colors flex items-center justify-center"
+                                            title="Add Item"
+                                        >
+                                            <Plus size={20} />
+                                        </button>
+                                    </>
+                                )}
+                                
+                                {/* Desktop Logout */}
+                                <button 
+                                    onClick={handleLogout}
+                                    className="hidden md:flex h-10 w-10 bg-slate-800 text-slate-400 hover:text-white rounded-lg border border-slate-700 hover:bg-slate-700 transition-colors items-center justify-center"
+                                    title="Sign Out"
+                                >
+                                    <LogOut size={20} />
+                                </button>
+                            </div>
+
+                            {/* Filter Row with Custom MultiSelects */}
+                            {!isSelectionMode && (
+                                <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+                                    <MultiSelect 
+                                        label="Category" 
+                                        icon={Layers}
+                                        options={categories} 
+                                        selected={filterCategory} 
+                                        onChange={setFilterCategory} 
+                                    />
+
+                                    <MultiSelect 
+                                        label="Collection" 
+                                        icon={Box}
+                                        options={collections} 
+                                        selected={filterCollections} 
+                                        onChange={setFilterCollections} 
+                                    />
+
+                                    <MultiSelect 
+                                        label="Brand" 
+                                        icon={Tag}
+                                        options={brands} 
+                                        selected={filterBrands} 
+                                        onChange={setFilterBrands} 
+                                    />
+
+                                    {(filterCategory.length > 0 || filterCollections.length > 0 || filterBrands.length > 0) && (
+                                        <button 
+                                            onClick={clearFilters}
+                                            className="text-xs text-slate-500 hover:text-slate-300 px-2 whitespace-nowrap h-8 flex items-center"
+                                        >
+                                            Clear
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </header>
+
+                    {/* Main Grid */}
+                    <main className="p-4 max-w-5xl mx-auto">
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                            {filtered.map(item => (
+                                <ItemCard 
+                                    key={item.id} 
+                                    item={item} 
+                                    isSelectionMode={isSelectionMode}
+                                    isSelected={selectedIds.has(item.id)}
+                                    onToggle={(id, val) => api.toggle(id, val).then(loadData)}
+                                    onClick={handleCardClick}
+                                    onDelete={handleDeleteRequest}
+                                />
+                            ))}
+                        </div>
+                    </main>
+                </div>
+            );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # Your existing Node.js App
+  collector:
+    build: .
+    container_name: collector_app
+    restart: unless-stopped
+    # We do NOT expose ports here anymore, Nginx handles entry
+    expose:
+      - "3000"
+    volumes:
+      # CHANGED: Use the named volume backed by SMB instead of local bind mount
+      - collector_data:/app/data
+    environment:
+      - DATA_DIR=/app/data
+
+  # The Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: collector_proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"   # HTTP (Redirects to HTTPS)
+      - "443:443" # HTTPS
+    volumes:
+      # Mount the configuration
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # Mount the certificates
+      - ./certs:/etc/nginx/certs:ro
+      # CHANGED: Mount the named volume (read-only) so Nginx can serve images
+      # We mount the root of the data volume to /app/data, so uploads are found at /app/data/uploads
+      - collector_data:/app/data:ro
+    depends_on:
+      - collector
+
+volumes:
+  collector_data:
+    driver_opts:
+      type: cifs
+      device: "${SMB_PATH}"
+      # ADD 'nobrl' to the options string below
+      o: "username=${SMB_USERNAME},password=${SMB_PASSWORD},vers=3.0,uid=1000,gid=1000,file_mode=0777,dir_mode=0777,nobrl"
